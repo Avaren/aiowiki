@@ -81,9 +81,12 @@ class Wiki:
         await self.http.login(json)
         return True
 
-    def get_page(self, page_title: str):
+    async def get_page(self, page_title: str):
         """Retrieves a page from the wiki. Returns a Page object."""
-        return Page(page_title, wiki=self)
+        page = Page(page_title, wiki=self)
+        await page.info()
+        page.page_id = 0 if 'missing' in page._info else page._info['pageid']
+        return page
 
     async def opensearch(
         self, search_query: str, limit: int = 10, namespace: str = "0"

@@ -17,6 +17,7 @@ class Page:
     def __init__(self, page_title, wiki):
         self.title = page_title
         self.wiki = wiki
+        self._info = None
 
     def __repr__(self):
         return f"<aiowiki.page.Page title={self.title}>"
@@ -41,6 +42,30 @@ class Page:
         cleantext = cleantext.replace("(edit)", "")
 
         return cleantext
+
+    async def page_id(self):
+        info = await self.info()
+        return info['pageid']
+
+    def is_redirected(self):
+        return 'redirect' in self._info
+
+    def exists(self) -> bool:
+        return 'missing' not in self._info
+
+    async def redirect_target(self):
+        if self.is_redirected():
+            if not self._info['redirect']:
+                redirect_title, redirect_pagedata = await self.wiki.http.get_redirects(self.title)
+                p = Page(redirect_title, self.wiki)
+                p._info = redirect_pagedata
+                self._info['redirect'] = p
+            return self._info['redirect']
+
+    async def info(self):
+        if not self._info:
+            self._info = await self.wiki.http.get_info(self.title)
+        return self._info
 
     async def html(self):
         """The pure page HTML."""
@@ -69,8 +94,16 @@ class Page:
         """Returns a list of all media used on the page."""
         return await self.wiki.http.get_media(self.title)
 
-    async def edit(self, content: str):
+    async def edit(self, content: str, summary:str = ''):
         """Edits the page."""
-        json = {"title": self.title, "text": content}
+        json = {"title": self.title, "text": content, "summary": summary}
         await self.wiki.http.edit_page(json)
+        return True
+
+    async def move(self, target: str, reason: str = '', redirect: bool = True):
+        """Edits the page."""
+        json = {"from": self.title, "to": target, 'reason': reason, 'movetalk': ''}
+        if not redirect:
+            json['noredirect'] = ''
+        await self.wiki.http.move_page(json)
         return True

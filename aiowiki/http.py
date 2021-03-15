@@ -1,6 +1,9 @@
+import asyncio
+
 from .exceptions import *
 from html import unescape
 
+THROTTLE = 10
 
 class HTTPClient:
     """A Proxy object for all API actions"""
@@ -9,6 +12,9 @@ class HTTPClient:
         self.url = url
         self.session = session
         self.logged_in = logged_in
+
+        self.lock_edit = asyncio.Lock()
+        self.last_edit = 0
 
     async def close(self):
         """Closes the aiohttp Session"""
@@ -70,21 +76,53 @@ class HTTPClient:
 
         return True
 
-    async def login(self, json):
+    async def login(self, data):
         """Logs in to the wiki"""
         token = await self.get_token("login")
-        json["action"] = "clientlogin"
-        json["loginreturnurl"] = self.url
-        json["format"] = "json"
-        json["rememberMe"] = 1
-        json["logintoken"] = token
+        data["action"] = "clientlogin"
+        data["loginreturnurl"] = 'https://example.com'
+        data["format"] = "json"
+        data["rememberMe"] = 1
+        data["logintoken"] = token
 
-        async with self.session.post(self.url, data=json) as r:
+        async with self.session.post(self.url, data=data) as r:
             json = await r.json()
         if json["clientlogin"]["status"] == "FAIL":
             raise LoginFailure(json["clientlogin"]["message"])
         self.logged_in = True
         return True
+
+    async def get_info(self, page, props=None):
+        """Gets Page html"""
+        props = props or []
+        url = f"{self.url}?action=query&titles={page}&prop=info&inprop={'|'.join(props)}&format=json"
+        async with self.session.get(url) as r:
+            data = await r.json()
+        return list(data['query']['pages'].values())[0]
+
+    async def get_redirects(self, page):
+        """Gets Page html"""
+        url = f"{self.url}?action=query&titles={page}&prop=info&format=json&redirects"
+        async with self.session.get(url) as r:
+            data = await r.json()
+
+        redirmap = {
+            item['from']: {'title': item['to'],
+                                   'section': '#'
+                                              + item['tofragment']
+                                   if 'tofragment' in item
+                                      and item['tofragment']
+                                   else ''}
+                    for item in data['query']['redirects']}
+
+        for item in data['query'].get('normalized', []):
+            if item['from'] == page:
+                page = item['to']
+                break
+
+        target_title = '%(title)s%(section)s' % redirmap[page]
+        pagedata = list(data['query']['pages'].values())[0]
+        return target_title, pagedata
 
     async def get_html(self, page):
         """Gets Page html"""
@@ -125,18 +163,32 @@ class HTTPClient:
 
     async def edit_page(self, json):
         """Edits a page's content"""
-        if self.logged_in:
-            token = await self.get_token("csrf")
-        else:
-            token = "+\\"
-        json["action"] = "edit"
-        json["format"] = "json"
-        json["token"] = token
-        async with self.session.post(self.url, data=json) as r:
-            data = await r.json()
-        if data.get("error"):
-            raise EditError(data["error"]["info"])
-        return True
+        await self.modify_page('edit', json)
+
+    async def move_page(self, json):
+        """Edits a page's content"""
+        await self.modify_page('move', json)
+
+    async def modify_page(self, action, json):
+        """Edits a page's content"""
+        async with self.lock_edit:
+            time = asyncio.get_event_loop().time() - self.last_edit
+            if time < THROTTLE:
+                print(f'Waiting for {THROTTLE-time} seconds before {action}-ing')
+                await asyncio.sleep(THROTTLE-time)
+            self.last_edit = asyncio.get_event_loop().time()
+            if self.logged_in:
+                token = await self.get_token("csrf")
+            else:
+                token = "+\\"
+            json["action"] = action
+            json["format"] = "json"
+            json["token"] = token
+            async with self.session.post(self.url, data=json) as r:
+                data = await r.json()
+            if data.get("error"):
+                raise EditError(data["error"]["info"])
+            return True
 
     async def opensearch(self, title, limit, namespace):
         """Searches for a page title and returns limit results as a list"""
